@@ -20,11 +20,16 @@ import static org.fcrepo.kernel.modeshape.utils.NamespaceTools.getNamespaces;
 
 import java.util.Map;
 import java.util.Scanner;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import javax.inject.Inject;
+import javax.jcr.NamespaceException;
+import javax.jcr.NamespaceRegistry;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
-import javax.jcr.NamespaceException;
+import javax.jcr.Workspace;
+import javax.jcr.query.*;
 
 import org.fcrepo.http.commons.session.SessionFactory;
 
@@ -46,6 +51,14 @@ public class NamespaceUtil {
 
     @Inject
     private SessionFactory sessionFactory;
+
+    private Session session;
+
+    private Workspace workspace;
+
+    private NamespaceRegistry namespaceRegistry;
+
+    private QueryManager queryManager;
 
     /**
      * Start and run the namespace utility
@@ -71,13 +84,44 @@ public class NamespaceUtil {
      **/
     public void run() throws RepositoryException {
         LOGGER.info("Starting namespace utility");
-        prompt(sessionFactory.getInternalSession());
+
+        session = sessionFactory.getInternalSession();
+        workspace = session.getWorkspace();
+        namespaceRegistry = workspace.getNamespaceRegistry();
+        queryManager = workspace.getQueryManager();
+
+        list();
+        //prompt();
         LOGGER.info("Stopping namespace utility");
     }
 
-    private void prompt(final Session session) throws RepositoryException {
-        final Map<String, String> namespaces = getNamespaces(session);
+    // get the set of "nsXXX" prefixes
+    private Set<String> getNSXXXPrefixes() {
+        return getNamespaces(session).keySet().stream().filter((k) -> k.startsWith("ns")).collect(Collectors.toSet());
+    }
 
+    private void list() throws RepositoryException {
+        for (final String prefix: getNSXXXPrefixes()) {
+            System.out.println(prefix);
+            final Query query = queryManager.createQuery(
+                    "SELECT * FROM [" + prefix + ":None]",
+                    "JCR-SQL2"
+            );
+            try {
+                final QueryResult result = query.execute();
+                final RowIterator rowIterator = result.getRows();
+                while (rowIterator.hasNext()) {
+                    final Row row = rowIterator.nextRow();
+                    final String path = row.getPath();
+                    System.out.println("  " + path);
+                }
+            } catch (InvalidQueryException ignored) {
+            }
+        }
+    }
+
+    private void prompt() throws RepositoryException {
+        final Map<String, String> namespaces = getNamespaces(session);
         System.out.println();
         System.out.println("#####################################");
         namespaces.forEach((k, v) -> System.out.println("Prefix " + k + ": " + v));
@@ -93,18 +137,27 @@ public class NamespaceUtil {
                         namespaces.get(prefix));
                 if (scan.hasNextLine()) {
                     final String newPrefix = scan.nextLine();
-                    try {
-                        session.getWorkspace().getNamespaceRegistry().registerNamespace(newPrefix,
-                                namespaces.get(prefix));
-                        session.save();
-                    } catch (final NamespaceException ex) {
-                        System.out.println("Could not change prefix (" + prefix + "): " + ex.getMessage());
+                    if (newPrefix.equals("")) {
+                        try {
+                            workspace.getNodeTypeManager().unregisterNodeType(prefix + ":None");
+                            namespaceRegistry.unregisterNamespace(prefix);
+                            session.save();
+                        } catch (final NamespaceException ex) {
+                            System.out.println("Could not remove prefix (" + prefix + "): " + ex.getMessage());
+                        }
+                    } else {
+                        try {
+                            namespaceRegistry.registerNamespace(newPrefix, namespaces.get(prefix));
+                            session.save();
+                        } catch (final NamespaceException ex) {
+                            System.out.println("Could not change prefix (" + prefix + "): " + ex.getMessage());
+                        }
                     }
                 }
             } else {
                 System.out.println("Invalid prefix: " + prefix);
             }
-            prompt(session);
+            prompt();
         }
     }
 }
