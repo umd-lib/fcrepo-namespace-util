@@ -18,6 +18,11 @@ package org.fcrepo.utils;
 import static org.slf4j.LoggerFactory.getLogger;
 import static org.fcrepo.kernel.modeshape.utils.NamespaceTools.getNamespaces;
 
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Scanner;
 import java.util.Set;
@@ -29,10 +34,14 @@ import javax.jcr.NamespaceRegistry;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
 import javax.jcr.Workspace;
+import javax.jcr.nodetype.NodeType;
+import javax.jcr.nodetype.NodeTypeIterator;
 import javax.jcr.query.*;
 
-import org.fcrepo.http.commons.session.SessionFactory;
+import com.opencsv.CSVWriter;
 
+import org.fcrepo.http.commons.session.SessionFactory;
+import org.modeshape.jcr.api.nodetype.NodeTypeManager;
 import org.slf4j.Logger;
 
 import org.springframework.context.ConfigurableApplicationContext;
@@ -69,8 +78,14 @@ public class NamespaceUtil {
             final NamespaceUtil nsUtil = new NamespaceUtil();
             ctx = new ClassPathXmlApplicationContext("classpath:/spring/master.xml");
             ctx.getBeanFactory().autowireBeanProperties(nsUtil, AutowireCapableBeanFactory.AUTOWIRE_BY_TYPE, false);
+
+            getPropertyOrExit("fcrepo.home", "/path/to/fcrepo/home");
+            getPropertyOrExit("fcrepo.modeshape.configuration", "/repo.json");
+            
             nsUtil.run();
         } catch (RepositoryException ex) {
+            ex.printStackTrace();
+        } catch (IOException ex) {
             ex.printStackTrace();
         } finally {
             if (null != ctx) {
@@ -79,10 +94,18 @@ public class NamespaceUtil {
         }
     }
 
+    public static String getPropertyOrExit(String propName, String sampleValue) {
+        if (System.getProperty(propName) == null) {
+            System.err.println("java -D" + propName + "=" + sampleValue + " ...");
+            System.exit(1);
+        }
+        return System.getProperty(propName);
+    }
+
     /**
      * Run the namespace change utility
      **/
-    public void run() throws RepositoryException {
+    public void run() throws RepositoryException, IOException {
         LOGGER.info("Starting namespace utility");
 
         session = sessionFactory.getInternalSession();
@@ -90,8 +113,19 @@ public class NamespaceUtil {
         namespaceRegistry = workspace.getNamespaceRegistry();
         queryManager = workspace.getQueryManager();
 
-        list();
-        //prompt();
+        String command = getPropertyOrExit("command", "list|check");
+
+        if ("list".equalsIgnoreCase(command)) {
+            String filepath = getPropertyOrExit("filepath", "/path/to/output/file");
+            list(filepath);
+        } else if ("check".equalsIgnoreCase(command)) {
+            String filepath = getPropertyOrExit("filepath", "/path/to/input/file");
+            // checkNamespacesInUse(filepath);
+        } else {
+            System.err.println("Unknown command: " + command);
+            System.exit(1);
+        }
+        
         LOGGER.info("Stopping namespace utility");
     }
 
@@ -100,65 +134,77 @@ public class NamespaceUtil {
         return getNamespaces(session).keySet().stream().filter((k) -> k.startsWith("ns")).collect(Collectors.toSet());
     }
 
-    private void list() throws RepositoryException {
-        for (final String prefix: getNSXXXPrefixes()) {
-            System.out.println(prefix);
-            final Query query = queryManager.createQuery(
-                    "SELECT * FROM [" + prefix + ":None]",
-                    "JCR-SQL2"
-            );
-            try {
-                final QueryResult result = query.execute();
-                final RowIterator rowIterator = result.getRows();
-                while (rowIterator.hasNext()) {
-                    final Row row = rowIterator.nextRow();
-                    final String path = row.getPath();
-                    System.out.println("  " + path);
+    private void list(String filepath) throws RepositoryException, IOException {
+        try {
+            CSVWriter writer = new CSVWriter(new FileWriter(filepath));
+            // Write data to the CSV file
+            String[] data = {"prefix", "resource"};
+            writer.writeNext(data);
+        
+            for (final String prefix: getNSXXXPrefixes()) {
+                data[0] = prefix;
+                System.out.println(prefix);
+                final Query query = queryManager.createQuery(
+                        "SELECT * FROM [" + prefix + ":None]",
+                        "JCR-SQL2"
+                );
+                try {
+                    final QueryResult result = query.execute();
+                    final RowIterator rowIterator = result.getRows();
+                    while (rowIterator.hasNext()) {
+                        final Row row = rowIterator.nextRow();
+                        final String path = row.getPath();
+                        System.out.println("  " + path);
+                        data[1] = path;
+                        writer.writeNext(data);
+                    }
+                } catch (InvalidQueryException ignored) {
                 }
-            } catch (InvalidQueryException ignored) {
             }
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 
-    private void prompt() throws RepositoryException {
-        final Map<String, String> namespaces = getNamespaces(session);
-        System.out.println();
-        System.out.println("#####################################");
-        namespaces.forEach((k, v) -> System.out.println("Prefix " + k + ": " + v));
-        System.out.println("#####################################");
-        System.out.println();
-        System.out.println("Enter a prefix to change (or 'ctrl-d' to end):");
+    private void checkNamespacesInUse(String inputFile) {
+        try {
 
-        final Scanner scan = new Scanner(System.in);
-        if (scan.hasNextLine()) {
-            final String prefix = scan.nextLine();
-            if (namespaces.containsKey(prefix)) {
-                System.out.println("Enter a new prefix for the URI (or 'ctrl-d' to cancel): " +
-                        namespaces.get(prefix));
-                if (scan.hasNextLine()) {
-                    final String newPrefix = scan.nextLine();
-                    if (newPrefix.equals("")) {
-                        try {
-                            workspace.getNodeTypeManager().unregisterNodeType(prefix + ":None");
-                            namespaceRegistry.unregisterNamespace(prefix);
-                            session.save();
-                        } catch (final NamespaceException ex) {
-                            System.out.println("Could not remove prefix (" + prefix + "): " + ex.getMessage());
-                        }
-                    } else {
-                        try {
-                            namespaceRegistry.registerNamespace(newPrefix, namespaces.get(prefix));
-                            session.save();
-                        } catch (final NamespaceException ex) {
-                            System.out.println("Could not change prefix (" + prefix + "): " + ex.getMessage());
-                        }
+
+            // Read namespaces from the input file
+            Set<String> namespaces = new HashSet<>();
+            try (BufferedReader reader = new BufferedReader(new FileReader(inputFile))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    namespaces.add(line);
+                }
+            }
+
+            NodeTypeManager nodeTypeManager = (NodeTypeManager) workspace.getNodeTypeManager();
+            NodeTypeIterator nodeTypes = nodeTypeManager.getAllNodeTypes();
+
+            while (nodeTypes.hasNext()) {
+                NodeType nodeType = nodeTypes.nextNodeType();
+                NodeType[] declaredPrefixes = nodeType.getDeclaredSupertypes();
+                for (String namespace : namespaces) {
+                    if (isNamespaceUsed(namespace, declaredPrefixes)) {
+                        System.out.println("Namespace " + namespace + " is used by node type " + nodeType.getName());
                     }
                 }
-            } else {
-                System.out.println("Invalid prefix: " + prefix);
             }
-            prompt();
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
+
+    private static boolean isNamespaceUsed(String namespace, NodeType[] prefixes) {
+        for (NodeType prefix : prefixes) {
+            if (prefix.toString().startsWith(namespace + ":")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    
 }
 
