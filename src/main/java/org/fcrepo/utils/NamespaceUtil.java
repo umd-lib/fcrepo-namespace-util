@@ -15,38 +15,52 @@
  */
 package org.fcrepo.utils;
 
-import static org.slf4j.LoggerFactory.getLogger;
 import static org.fcrepo.kernel.modeshape.utils.NamespaceTools.getNamespaces;
+import static org.slf4j.LoggerFactory.getLogger;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
-import java.util.Scanner;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
-import javax.jcr.NamespaceException;
 import javax.jcr.NamespaceRegistry;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
 import javax.jcr.Workspace;
-import javax.jcr.nodetype.NodeType;
 import javax.jcr.nodetype.NodeTypeIterator;
-import javax.jcr.query.*;
-
-import com.opencsv.CSVWriter;
+import javax.jcr.query.InvalidQueryException;
+import javax.jcr.query.Query;
+import javax.jcr.query.QueryManager;
+import javax.jcr.query.QueryResult;
+import javax.jcr.query.Row;
+import javax.jcr.query.RowIterator;
 
 import org.fcrepo.http.commons.session.SessionFactory;
 import org.modeshape.jcr.api.nodetype.NodeTypeManager;
+import org.modeshape.jcr.value.ValueFormatException;
 import org.slf4j.Logger;
-
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.support.ClassPathXmlApplicationContext;
-import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+
+import com.opencsv.CSVReader;
+import com.opencsv.CSVWriter;
 
 /**
  * Utility to manipulate namespace prefixes
@@ -68,6 +82,14 @@ public class NamespaceUtil {
     private NamespaceRegistry namespaceRegistry;
 
     private QueryManager queryManager;
+
+    private NodeTypeManager nodeTypeManager;
+
+    private Map<String, Set<String>> parentNamespaceUris = new HashMap<String, Set<String>>();;
+
+    private Map<String, Set<String>> childNamespaceUris = new HashMap<String, Set<String>>();;
+
+    private String startTime;
 
     /**
      * Start and run the namespace utility
@@ -107,20 +129,27 @@ public class NamespaceUtil {
      **/
     public void run() throws RepositoryException, IOException {
         LOGGER.info("Starting namespace utility");
+        startTime = new SimpleDateFormat("yyyyMMdd_HHmmss").format(Calendar.getInstance().getTime());
 
         session = sessionFactory.getInternalSession();
         workspace = session.getWorkspace();
         namespaceRegistry = workspace.getNamespaceRegistry();
         queryManager = workspace.getQueryManager();
+        nodeTypeManager = (NodeTypeManager) session.getWorkspace().getNodeTypeManager();
 
         String command = getPropertyOrExit("command", "list|check");
 
         if ("list".equalsIgnoreCase(command)) {
             String filepath = getPropertyOrExit("filepath", "/path/to/output/file");
-            list(filepath);
-        } else if ("check".equalsIgnoreCase(command)) {
+            boolean skipResources = Boolean.parseBoolean(System.getProperty("skip.resources"));
+            list(filepath, skipResources);
+        } else if ("add-resources".equalsIgnoreCase(command)) {
             String filepath = getPropertyOrExit("filepath", "/path/to/input/file");
-            // checkNamespacesInUse(filepath);
+            add_resources(filepath);
+        } else if ("clean".equalsIgnoreCase(command)) {
+            String filepath = getPropertyOrExit("filepath", "/path/to/input/file");
+            String cleanType = getPropertyOrExit("clean.type", "nodetype|namespace");
+            clean(filepath, cleanType, System.getProperty("skip.until.prefix"));
         } else {
             System.err.println("Unknown command: " + command);
             System.exit(1);
@@ -130,81 +159,376 @@ public class NamespaceUtil {
     }
 
     // get the set of "nsXXX" prefixes
-    private Set<String> getNSXXXPrefixes() {
-        return getNamespaces(session).keySet().stream().filter((k) -> k.startsWith("ns")).collect(Collectors.toSet());
+    private Map<String, List<String>> getNSXXXPrefixesMap() {
+        return getNamespaces(session).keySet().stream().filter((k) -> k.startsWith("ns")).collect(Collectors.toMap(k -> k, k -> new ArrayList<>()));
     }
 
-    private void list(String filepath) throws RepositoryException, IOException {
+    // get the set of "nsXXX" prefixes
+    private Map<String, List<String>> getSpuriousNodeTypes() throws RepositoryException {
+        Map<String, List<String>> namespacesWithNodeType = getNSXXXPrefixesMap();
+        NodeTypeManager nodeTypeManager = (NodeTypeManager) workspace.getNodeTypeManager();
+        NodeTypeIterator nodeTypes = nodeTypeManager.getAllNodeTypes();
+
+        while (nodeTypes.hasNext()) {
+            String nodeTypeName = nodeTypes.nextNodeType().getName();
+            String nodeTypePrefix = nodeTypeName.split(":")[0];
+            if (nodeTypeName.startsWith("ns") && nodeTypeName.endsWith(":None")) {
+                if(namespacesWithNodeType.get(nodeTypePrefix) != null) {
+                    namespacesWithNodeType.get(nodeTypePrefix).add(nodeTypeName);
+                } else {
+                    LOGGER.info("No matching namespace for NodeType: " + nodeTypeName);
+                    List<String> nodeTypeList = new ArrayList<String>();
+                    nodeTypeList.add(nodeTypeName);
+                    namespacesWithNodeType.put(nodeTypePrefix, nodeTypeList);
+                }
+            }
+        }
+        return namespacesWithNodeType;
+    }
+
+    private void list(String filepath, boolean skipResources) throws RepositoryException, IOException {
         try {
             CSVWriter writer = new CSVWriter(new FileWriter(filepath));
             // Write data to the CSV file
-            String[] data = {"prefix", "resource"};
+            String[] data = {"namespace", "namespaceUri", "nodeType", "resource"};
             writer.writeNext(data);
-        
-            for (final String prefix: getNSXXXPrefixes()) {
-                data[0] = prefix;
-                System.out.println(prefix);
-                final Query query = queryManager.createQuery(
-                        "SELECT * FROM [" + prefix + ":None]",
-                        "JCR-SQL2"
-                );
-                try {
-                    final QueryResult result = query.execute();
-                    final RowIterator rowIterator = result.getRows();
-                    while (rowIterator.hasNext()) {
-                        final Row row = rowIterator.nextRow();
-                        final String path = row.getPath();
-                        System.out.println("  " + path);
-                        data[1] = path;
-                        writer.writeNext(data);
+
+            Map<String, List<String>> namespacesWithNodeType = getSpuriousNodeTypes();
+            data[3] = "";
+
+            for (final String namespacePrefix: namespacesWithNodeType.keySet()) {
+                String namespaceUri = namespaceRegistry.getURI(namespacePrefix);
+
+                // Omit ns prefixed namespaces that is not spurious
+                if (! namespaceUri.contains("tx:")) {
+                    continue;
+                }
+                data[0] = namespacePrefix;
+                data[1] = namespaceUri;
+                List<String> nodeTypesList = namespacesWithNodeType.get(namespacePrefix);
+                if (nodeTypesList == null || nodeTypesList.isEmpty()) {
+                    data[2] = "";
+                    writer.writeNext(data);
+                } else {
+                    for (final String nodeType: nodeTypesList) {
+                        
+                        
+                        data[2] = nodeType;
+
+                        if (skipResources) {
+                            writer.writeNext(data);
+                            continue;
+                        }
+
+                        LOGGER.info("Processing Prefix " + namespacePrefix);
+                        final Query query = queryManager.createQuery(
+                                "SELECT * FROM [" + nodeType + "]",
+                                "JCR-SQL2"
+                        );
+                        try {
+                            final QueryResult result = query.execute();
+                            final RowIterator rowIterator = result.getRows();
+                            if (! rowIterator.hasNext()) {
+                                data[3] = "";
+                                writer.writeNext(data);
+                            } else {
+                                while (rowIterator.hasNext()) {
+                                    final Row row = rowIterator.nextRow();
+                                    final String path = row.getPath();
+                                    LOGGER.info("  " + path);
+                                    data[3] = path;
+                                    writer.writeNext(data);
+                                }
+                            }
+                        } catch (InvalidQueryException ignored) {
+                        }
                     }
-                } catch (InvalidQueryException ignored) {
                 }
             }
+            writer.close();
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private void checkNamespacesInUse(String inputFile) {
-        try {
-
+    private void add_resources(String filepath) {
+        String tempFilePath = filepath.replace(".csv", "-" + startTime + "-resources.csv");
+        try (
+            CSVWriter withResourcesWriter = new CSVWriter(new FileWriter(tempFilePath));
+        ) {
+            String[] data = {"namespace", "namespaceUri", "nodeType", "resource"};
+            
+            withResourcesWriter.writeNext(data);
 
             // Read namespaces from the input file
-            Set<String> namespaces = new HashSet<>();
-            try (BufferedReader reader = new BufferedReader(new FileReader(inputFile))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    namespaces.add(line);
+            try (CSVReader reader = new CSVReader(new FileReader(filepath))) {
+                // Skip header row
+                reader.skip(1);
+
+                Iterator<String[]> csvRowIterator = reader.iterator();
+                while (csvRowIterator.hasNext()) {
+                    data = csvRowIterator.next();
+                    LOGGER.info("Processing prefix: " + data[0] + ": ");
+
+                    if (data[3] != null && ! "".equals(data[3])) {
+                        withResourcesWriter.writeNext(data);
+                        LOGGER.info("  Resource exists - writing as-is.");
+                        continue;
+                    }
+
+
+                    final Query query = queryManager.createQuery(
+                        "SELECT * FROM [" + data[2] + "]",
+                        "JCR-SQL2"
+                    );
+                    try {
+                        final QueryResult result = query.execute();
+                        final RowIterator rowIterator = result.getRows();
+
+                        if (rowIterator.hasNext()) {
+                            data[3] = rowIterator.nextRow().getPath();
+                            withResourcesWriter.writeNext(data);
+                            LOGGER.info("  Adding resource from jcr query.");
+                        } else {
+                            LOGGER.info("  No resource found.");
+                        }
+                    } catch (InvalidQueryException ignored) {
+                    }
+                    
                 }
             }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        // Replace the input file with temp file
+        try {
+            Files.move(Paths.get(tempFilePath), Paths.get(filepath), StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 
-            NodeTypeManager nodeTypeManager = (NodeTypeManager) workspace.getNodeTypeManager();
-            NodeTypeIterator nodeTypes = nodeTypeManager.getAllNodeTypes();
+    private void clean(String filepath, String type, String skipUntilPrefix) {
+        String statusFilePath = filepath + ".status";
 
-            while (nodeTypes.hasNext()) {
-                NodeType nodeType = nodeTypes.nextNodeType();
-                NodeType[] declaredPrefixes = nodeType.getDeclaredSupertypes();
-                for (String namespace : namespaces) {
-                    if (isNamespaceUsed(namespace, declaredPrefixes)) {
-                        System.out.println("Namespace " + namespace + " is used by node type " + nodeType.getName());
+        if ("namespace".equalsIgnoreCase(type)) {
+            if(hasSpuriousNodeTypeExists()) {
+                LOGGER.info("Clean up splurious nodetypes before attempting namespace cleanup.");
+                return;
+            }
+            buildNamespaceUriRelationships();
+            statusFilePath += ".namespace";
+        } else {
+            statusFilePath += ".nodetype";
+
+        }
+
+        if (skipUntilPrefix == null) {
+            skipUntilPrefix = readLastProcessingPrefix(statusFilePath);
+        }
+
+        String completedFilePath = filepath.replace(".csv", "-" + startTime + "-completed.csv");
+        String rejectedFilePath = filepath.replace(".csv", "-" + startTime + "-rejected.csv");
+        String skippedFilePath = filepath.replace(".csv", "-" + startTime + "-skipped.csv");
+
+        String[] data = {"namespace", "namespaceUri", "nodeType", "resource"};
+        
+        writeCSVLineToFile(completedFilePath, data, false);
+        writeCSVLineToFile(rejectedFilePath, data, false);
+        writeCSVLineToFile(skippedFilePath, data, false);
+
+        boolean skipComplete = false;
+        
+        // Read namespaces from the input file
+        try (CSVReader reader = new CSVReader(new FileReader(filepath))) {
+            // Skip header row
+            reader.skip(1);
+
+            Iterator<String[]> csvRowIterator = reader.iterator();
+            while (csvRowIterator.hasNext()) {
+                data = csvRowIterator.next();
+                LOGGER.info("Processing prefix: " + data[0] + ": ");
+                
+                if (skipUntilPrefix != null && ! skipComplete) {
+                    if (skipUntilPrefix.equals(data[0])) {
+                        LOGGER.info("Skip to target reached.");
+                        skipComplete = true;
+                    } else {
+                        LOGGER.info("  Skipping prefix: " + data[0]);
+                        writeCSVLineToFile(skippedFilePath, data, true);
+                        continue;
                     }
                 }
+
+                // Write the current processing prefix to a file for resumability
+                writeCurrentProcessingPrefix(statusFilePath, data[0]);
+
+
+                if ("namespace".equalsIgnoreCase(type)) {
+                    if (! doesNamespaceExists(data[0])) {
+                        LOGGER.info("Namespace already unregistered.");
+                        writeCSVLineToFile(skippedFilePath, data, true);
+                        removeRelationships(data[1]);
+                        continue;
+                    }
+                    if (hasChildNamespaceUris(data[1])) {
+                        LOGGER.info("Rejecting - has child namespace URIs");
+                        writeCSVLineToFile(rejectedFilePath, data, true);
+                    } else if (doesNodeTypeExists(data[2])) {
+                        LOGGER.info("  Cannot unregister namespace while corresponding nodeType still exists");
+                        writeCSVLineToFile(rejectedFilePath, data, true);
+                    } else {
+                        namespaceRegistry.unregisterNamespace(data[0]);
+                        removeRelationships(data[1]);
+                        writeCSVLineToFile(completedFilePath, data, true);
+                        LOGGER.info(" Unregistered namespace: " + data[0]);
+                    }
+                } else {
+
+
+                    final Query query = queryManager.createQuery(
+                        "SELECT * FROM [" + data[2] + "]",
+                        "JCR-SQL2"
+                        );
+                        
+                    try {
+                        final QueryResult result = query.execute();
+                        final RowIterator rowIterator = result.getRows();
+
+                        if (rowIterator.hasNext()) {  
+                            LOGGER.info("Rejecting - has associated resources");
+                            if (data[3] == null || "".equals(data[3])) {
+                                data[3] = rowIterator.nextRow().getPath();
+                                writeCSVLineToFile(rejectedFilePath, data, true);
+                            } else {
+                                writeCSVLineToFile(rejectedFilePath, data, true);
+                            }
+                        } else {
+                            nodeTypeManager.unregisterNodeType(data[2]);
+                            LOGGER.info(" Unregistered nodeType: " + data[2]);
+                            session.save();
+                            writeCSVLineToFile(completedFilePath, data, true);
+                        }
+
+                    } catch (InvalidQueryException e) {
+                        e.printStackTrace();
+                    }
+                }
+                
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private static boolean isNamespaceUsed(String namespace, NodeType[] prefixes) {
-        for (NodeType prefix : prefixes) {
-            if (prefix.toString().startsWith(namespace + ":")) {
-                return true;
-            }
+    private String readLastProcessingPrefix(String statusFilePath) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(statusFilePath))) {
+            LOGGER.info("Reading last processed prefix from status file.");
+            return reader.readLine();
+        } catch (IOException e) {
+            // status file doesn't exist, start from the beginning
+            return null;
         }
-        return false;
     }
 
-    
+    private static void writeCSVLineToFile(String filepath, String[] data, boolean appendMode) {
+        try (CSVWriter writer = new CSVWriter(new FileWriter(filepath, appendMode))) {
+            writer.writeNext(data);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+            
+    }
+
+    private static void writeCurrentProcessingPrefix(String statusFilePath, String lastProcessingPrefix) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(statusFilePath))) {
+            writer.write(lastProcessingPrefix);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private boolean hasSpuriousNodeTypeExists() {
+        boolean found = false;
+        try {
+            NodeTypeIterator nodeTypes = nodeTypeManager.getAllNodeTypes();
+            while (nodeTypes.hasNext()) {
+                String nodeTypeName = nodeTypes.nextNodeType().getName();
+                if (nodeTypeName.startsWith("ns") && nodeTypeName.endsWith(":None")) {
+                    LOGGER.info("Found spurious nodeTpe: " + nodeTypeName);
+                    found = true;
+                }
+            }
+        } catch(RepositoryException e) {
+            e.printStackTrace();
+        }
+        return found;
+    }
+
+    private void buildNamespaceUriRelationships() {
+        try {
+            Set<String> namespaceURIs = Arrays.stream(namespaceRegistry.getURIs()).filter((k) -> k.contains("tx:")).collect(Collectors.toSet());
+            LOGGER.info("Building namespace uri relationships");
+
+            for(String uri : namespaceURIs) {
+                LOGGER.debug("Building relationship for: " + uri);
+                Set<String> parents;
+                Set<String> children = new HashSet<String>();
+                String trimmedUri = uri;
+                for (int i = 0; i < 4; i++) {
+                    trimmedUri = trimmedUri.substring(0, trimmedUri.lastIndexOf("/", trimmedUri.length()-2) + 1);
+                    LOGGER.debug("  Checking for parent at: " + trimmedUri);
+                    if (namespaceURIs.contains(trimmedUri)) {
+                        LOGGER.debug("    Found. Adding parent/child relationships.");
+                        parents = parentNamespaceUris.containsKey(uri) ? parentNamespaceUris.get(uri) : new HashSet<String>();
+                        children = childNamespaceUris.containsKey(trimmedUri) ? childNamespaceUris.get(trimmedUri) : new HashSet<String>();
+                        parents.add(trimmedUri);
+                        children.add(uri);
+                        parentNamespaceUris.put(uri, parents);
+                        childNamespaceUris.put(trimmedUri, children);
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        LOGGER.info("Building namespace uri relationships");
+    }
+
+    private boolean hasChildNamespaceUris(String uri) {
+        return (childNamespaceUris.get(uri) != null) && ! childNamespaceUris.get(uri).isEmpty(); 
+    }
+
+    private void removeRelationships(String uri) {
+        LOGGER.debug(" Removing relationship for: " + uri);
+        if (parentNamespaceUris.get(uri) == null) {
+            return;
+        }
+        for(String parent : parentNamespaceUris.get(uri)) {
+            childNamespaceUris.get(parent).remove(uri);
+            LOGGER.debug("  Removed from: " + parent);
+        }
+    }
+
+    private boolean doesNodeTypeExists(String nodeType) throws RepositoryException {
+        boolean exists = false;
+        try {
+            exists = nodeTypeManager.hasNodeType(nodeType);
+        } catch(ValueFormatException e) {
+            e.printStackTrace();
+        }
+        return exists;
+    }
+
+    private boolean doesNamespaceExists(String prefix) throws RepositoryException {
+        boolean exists = false;
+        try {
+            exists = ! namespaceRegistry.getURI(prefix).isEmpty();
+        } catch(Exception e) {
+            e.printStackTrace();
+        }
+        return exists;
+    }
 }
 
