@@ -39,6 +39,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
+import javax.jcr.NamespaceException;
 import javax.jcr.NamespaceRegistry;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
@@ -119,7 +120,7 @@ public class NamespaceUtil {
     public static String getPropertyOrExit(String propName, String sampleValue) {
         if (System.getProperty(propName) == null) {
             System.err.println("java -D" + propName + "=" + sampleValue + " ...");
-            System.exit(1);
+            System.exit(2);
         }
         return System.getProperty(propName);
     }
@@ -148,11 +149,11 @@ public class NamespaceUtil {
             add_resources(filepath);
         } else if ("clean".equalsIgnoreCase(command)) {
             String filepath = getPropertyOrExit("filepath", "/path/to/input/file");
-            String cleanType = getPropertyOrExit("clean.type", "nodetype|namespace");
-            clean(filepath, cleanType, System.getProperty("skip.until.prefix"));
+            String mode = getPropertyOrExit("clean.mode", "nodetype|namespace");
+            clean(filepath, mode, System.getProperty("skip.until.prefix"));
         } else {
             System.err.println("Unknown command: " + command);
-            System.exit(1);
+            System.exit(2);
         }
         
         LOGGER.info("Stopping namespace utility");
@@ -309,17 +310,26 @@ public class NamespaceUtil {
     }
 
     private void clean(String filepath, String type, String skipUntilPrefix) {
+
+        boolean dryRun = Boolean.parseBoolean(System.getProperty("dryrun"));
+
+        String dryRunStr = dryRun ? ".dryrun" : "";
+
+        if (dryRun) {
+            LOGGER.warn("Running in DRY RUN mode -- will NOT unregister nodetype/namespaces.");
+        }
+
         String statusFilePath = filepath + ".status";
 
         if ("namespace".equalsIgnoreCase(type)) {
             if(hasSpuriousNodeTypeExists()) {
-                LOGGER.info("Clean up splurious nodetypes before attempting namespace cleanup.");
+                LOGGER.error("Clean up splurious nodetypes before attempting namespace cleanup.");
                 return;
             }
             buildNamespaceUriRelationships();
-            statusFilePath += ".namespace";
+            statusFilePath += ".namespace" + dryRunStr;
         } else {
-            statusFilePath += ".nodetype";
+            statusFilePath += ".nodetype" + dryRunStr;
 
         }
 
@@ -327,9 +337,10 @@ public class NamespaceUtil {
             skipUntilPrefix = readLastProcessingPrefix(statusFilePath);
         }
 
-        String completedFilePath = filepath.replace(".csv", "-" + startTime + "-completed.csv");
-        String rejectedFilePath = filepath.replace(".csv", "-" + startTime + "-rejected.csv");
-        String skippedFilePath = filepath.replace(".csv", "-" + startTime + "-skipped.csv");
+        String completedFilePath = filepath.replace(".csv", "-" + startTime + "-completed.csv" + dryRunStr);
+        String rejectedFilePath = filepath.replace(".csv", "-" + startTime + "-rejected.csv" + dryRunStr);
+        String skippedFilePath = filepath.replace(".csv", "-" + startTime + "-skipped.csv" + dryRunStr);
+
 
         String[] data = {"namespace", "namespaceUri", "nodeType", "resource"};
         
@@ -378,7 +389,13 @@ public class NamespaceUtil {
                         LOGGER.info("  Cannot unregister namespace while corresponding nodeType still exists");
                         writeCSVLineToFile(rejectedFilePath, data, true);
                     } else {
-                        namespaceRegistry.unregisterNamespace(data[0]);
+                        if (! dryRun) {
+                            try {
+                                namespaceRegistry.unregisterNamespace(data[0]);
+                            } catch (NamespaceException e) {
+                                e.printStackTrace();
+                            }
+                        }
                         removeRelationships(data[1]);
                         writeCSVLineToFile(completedFilePath, data, true);
                         LOGGER.info(" Unregistered namespace: " + data[0]);
@@ -404,7 +421,9 @@ public class NamespaceUtil {
                                 writeCSVLineToFile(rejectedFilePath, data, true);
                             }
                         } else {
-                            nodeTypeManager.unregisterNodeType(data[2]);
+                            if (! dryRun) {
+                                nodeTypeManager.unregisterNodeType(data[2]);
+                            }
                             LOGGER.info(" Unregistered nodeType: " + data[2]);
                             session.save();
                             writeCSVLineToFile(completedFilePath, data, true);
