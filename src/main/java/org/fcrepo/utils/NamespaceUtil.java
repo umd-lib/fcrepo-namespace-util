@@ -309,7 +309,8 @@ public class NamespaceUtil {
                             writeCSVLineToFile(tempFilePath, data, true);
                             LOGGER.info("  Adding resource from jcr query.");
                         } else {
-                            LOGGER.info("  No resource found.");
+                            LOGGER.info("  No resource found - writing as-is.");
+                            writeCSVLineToFile(tempFilePath, data, true);
                         }
                     } catch (InvalidQueryException ignored) {
                     }
