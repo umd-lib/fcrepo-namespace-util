@@ -37,9 +37,23 @@ if not os.path.isfile(input_csv_filename):
     print(f"Error: Input CSV file '{input_csv_filename}' not found.")
     sys.exit(1)
 
+def read_status_from_file(filename):
+    try:
+        with open(filename, 'r') as file:
+            word = file.read()
+        return word
+    except FileNotFoundError:
+        print(f"No status file at '{filename}'. The script will process from the beginning of the file.")
+        return None
+
+def write_status_to_file(filename, status):
+    with open(filename, 'w') as file:
+        file.write(status)
+
 # Output CSV filename based on input CSV filename and timestamp
 timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 output_csv_filename = f"{os.path.splitext(input_csv_filename)[0]}-{timestamp}-patch-completed{dry_run_str}.csv"
+status_filename = f"{input_csv_filename}.status.patch"
 
 # Open the input and output CSV files
 with open(input_csv_filename, mode='r') as input_csv_file, open(output_csv_filename, mode='w', newline='') as output_csv_file:
@@ -54,18 +68,33 @@ with open(input_csv_filename, mode='r') as input_csv_file, open(output_csv_filen
         "Content-Type": "application/sparql-update"
     }
 
+    skipUntil = read_status_from_file(status_filename)
+
+    skipComplete = False
+
     for row in csv_reader:
         print(f"Processing row with prefix {row['namespace']}")
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        namespace = row['namespace']
         resource = row['resource']
         namespace_uri = row['namespaceUri']
 
         # Prepare the SPARQL DELETE DATA statement
         sparql_query = sparql_template.format(namespace_uri=namespace_uri)
 
+        if skipUntil and not skipComplete:
+            if skipUntil == namespace:
+                print(f"Skip target reached: {namespace}")
+                skipComplete = True
+            else:
+                print(f"Skipping previouly processed line: {namespace}.")
+                continue
+
+        write_status_to_file(status_filename, namespace)
+
         # Skip
-        if resource is None or resource == "":
-            print(f"  Skipping: {resource}")
+        if resource is None or resource.strip() == "":
+            print(f"  Skipping: {namespace} without resource.")
             continue
 
         resource = resource.replace("jcr:content", "fcr:metadata")
@@ -94,6 +123,8 @@ with open(input_csv_filename, mode='r') as input_csv_file, open(output_csv_filen
             "Response Code": status,
             "Request Time": timestamp
         })
+
+        output_csv_file.flush()
 
         if wait_seconds:
             print(f"  Pausing {wait_seconds} seconds")

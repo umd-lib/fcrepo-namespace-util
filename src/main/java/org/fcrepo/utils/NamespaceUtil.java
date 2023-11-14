@@ -20,6 +20,7 @@ import static org.slf4j.LoggerFactory.getLogger;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -102,7 +103,6 @@ public class NamespaceUtil {
             ctx = new ClassPathXmlApplicationContext("classpath:/spring/master.xml");
             ctx.getBeanFactory().autowireBeanProperties(nsUtil, AutowireCapableBeanFactory.AUTOWIRE_BY_TYPE, false);
 
-            getPropertyOrExit("fcrepo.home", "/path/to/fcrepo/home");
             getPropertyOrExit("fcrepo.modeshape.configuration", "/repo.json");
             
             nsUtil.run();
@@ -253,26 +253,44 @@ public class NamespaceUtil {
     }
 
     private void add_resources(String filepath) {
-        String tempFilePath = filepath.replace(".csv", "-" + startTime + "-resources.csv");
-        try (
-            CSVWriter withResourcesWriter = new CSVWriter(new FileWriter(tempFilePath));
-        ) {
+        String tempFilePath = filepath + ".add-resource-working-file";
+        String statusFilePath = filepath + ".status.add-resources";
+        String skipUntilPrefix = readLastProcessingPrefix(statusFilePath);
+        try {
             String[] data = {"namespace", "namespaceUri", "nodeType", "resource"};
-            
-            withResourcesWriter.writeNext(data);
+
+            if (!(new File(tempFilePath).isFile())) {
+                writeCSVLineToFile(tempFilePath, data, false);
+            }
 
             // Read namespaces from the input file
             try (CSVReader reader = new CSVReader(new FileReader(filepath))) {
                 // Skip header row
                 reader.skip(1);
 
+                boolean skipComplete = false;
+
                 Iterator<String[]> csvRowIterator = reader.iterator();
                 while (csvRowIterator.hasNext()) {
                     data = csvRowIterator.next();
+
+                    if (skipUntilPrefix != null && ! skipComplete) {
+                        if (skipUntilPrefix.equals(data[0])) {
+                            LOGGER.info("Skip to target reached.");
+                            skipComplete = true;
+                        } else {
+                            LOGGER.info("Skipping prefix: " + data[0]);
+                            continue;
+                        }
+                    }
+
+                    // Write the current processing prefix to a file for resumability
+                    writeCurrentProcessingPrefix(statusFilePath, data[0]);
+
                     LOGGER.info("Processing prefix: " + data[0] + ": ");
 
                     if (data[3] != null && ! "".equals(data[3])) {
-                        withResourcesWriter.writeNext(data);
+                        writeCSVLineToFile(tempFilePath, data, true);
                         LOGGER.info("  Resource exists - writing as-is.");
                         continue;
                     }
@@ -288,7 +306,7 @@ public class NamespaceUtil {
 
                         if (rowIterator.hasNext()) {
                             data[3] = rowIterator.nextRow().getPath();
-                            withResourcesWriter.writeNext(data);
+                            writeCSVLineToFile(tempFilePath, data, true);
                             LOGGER.info("  Adding resource from jcr query.");
                         } else {
                             LOGGER.info("  No resource found.");
