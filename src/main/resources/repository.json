@@ -30,5 +30,5 @@
             { "classname" : "org.fcrepo.auth.common.ServletContainerAuthenticationProvider" }
         ]
     },
-    "node-types" : ["fedora-node-types.cnd", "classpath:/namespaces.cnd"]
+    "node-types" : ["fedora-node-types.cnd", "namespaces.cnd"]
 }
