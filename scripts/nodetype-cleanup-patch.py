@@ -3,6 +3,7 @@ import csv
 import requests
 import datetime
 import sys
+import time
 
 # Define your base URL
 base_url = os.environ.get("FCREPO_REST_ENDPOINT") or "http://fcrepo-local:8080/fcrepo/rest"
@@ -10,6 +11,10 @@ base_url = os.environ.get("FCREPO_REST_ENDPOINT") or "http://fcrepo-local:8080/f
 base_url = base_url.strip("/")
 
 wait_seconds = os.environ.get("WAIT_SECONDS") or False
+
+dry_run = os.environ.get("DRY_RUN").lower() == "true" if os.environ.get("DRY_RUN") else False
+
+dry_run_str = "-dryrun" if dry_run else ""
 
 # Define the SPARQL DELETE DATA template
 sparql_template = 'DELETE DATA {{ <> a <{namespace_uri}None>}}'
@@ -34,7 +39,7 @@ if not os.path.isfile(input_csv_filename):
 
 # Output CSV filename based on input CSV filename and timestamp
 timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-output_csv_filename = f"{os.path.splitext(input_csv_filename)[0]}-{timestamp}-completed.csv"
+output_csv_filename = f"{os.path.splitext(input_csv_filename)[0]}-{timestamp}-patch-completed{dry_run_str}.csv"
 
 # Open the input and output CSV files
 with open(input_csv_filename, mode='r') as input_csv_file, open(output_csv_filename, mode='w', newline='') as output_csv_file:
@@ -58,16 +63,14 @@ with open(input_csv_filename, mode='r') as input_csv_file, open(output_csv_filen
         # Prepare the SPARQL DELETE DATA statement
         sparql_query = sparql_template.format(namespace_uri=namespace_uri)
 
-        print(f"--{resource}--")
-
         # Skip
         if resource is None or resource == "":
-            print(f"++Skipping++")
+            print(f"  Skipping: {resource}")
             continue
 
         resource = resource.replace("jcr:content", "fcr:metadata")
 
-        print(f"++Processing++")
+        print(f"  Processing: {resource}")
 
         # Build the request URI
         request_uri = resource if resource.startswith("http") else f"{base_url}{resource}"
@@ -77,20 +80,24 @@ with open(input_csv_filename, mode='r') as input_csv_file, open(output_csv_filen
         # print(f"    {sparql_query}")
         # next
 
-        # Send the PATCH request
-        response = requests.patch(request_uri, data=sparql_query, headers=headers)
+        status = ""
+
+        if not dry_run:
+            # Send the PATCH request
+            response = requests.patch(request_uri, data=sparql_query, headers=headers)
+            status = response.status_code
 
         # Write the results to the output CSV file
         csv_writer.writerow({
             "Request URI": request_uri,
             "SPARQL Data": sparql_query,
-            "Response Code": response.status_code,
+            "Response Code": status,
             "Request Time": timestamp
         })
 
         if wait_seconds:
-            logger.info("Pausing {0} seconds".format(wait_seconds))
-            sleep(int(wait_seconds))
+            print(f"  Pausing {wait_seconds} seconds")
+            time.sleep(int(wait_seconds))
 
 # Print a message to indicate the completion
 print(f"Requests completed. Results written to {output_csv_filename}")

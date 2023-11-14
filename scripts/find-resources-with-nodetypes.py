@@ -4,8 +4,9 @@ import requests
 import datetime
 import sys
 import pysolr
+import time
 
-solr_url = os.environ.get("SOLR_URL") or "http://fcrepo-local:8080/fcrepo/rest"
+solr_url = os.environ.get("SOLR_URL") or "http://localhost:8983/solr/fedora4/"
 
 wait_seconds = os.environ.get("WAIT_SECONDS") or False
 
@@ -73,8 +74,8 @@ def main():
                 csv_writer.writerow(row)
 
             if wait_seconds:
-                logger.info("Pausing {0} seconds".format(wait_seconds))
-                sleep(int(wait_seconds))
+                print(f"  Pausing {wait_seconds} seconds")
+                time.sleep(int(wait_seconds))
 
         for row in rows_without_resource:
             csv_writer.writerow(row)

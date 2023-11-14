@@ -320,6 +320,9 @@ public class NamespaceUtil {
         }
 
         String statusFilePath = filepath + ".status";
+        String completedFilePath;
+        String rejectedFilePath;
+        String skippedFilePath;
 
         if ("namespace".equalsIgnoreCase(type)) {
             if(hasSpuriousNodeTypeExists()) {
@@ -328,19 +331,20 @@ public class NamespaceUtil {
             }
             buildNamespaceUriRelationships();
             statusFilePath += ".namespace" + dryRunStr;
+            completedFilePath = filepath.replace(".csv", "-" + startTime + "-namespace-completed.csv" + dryRunStr);
+            rejectedFilePath = filepath.replace(".csv", "-" + startTime + "-namespace-rejected.csv" + dryRunStr);
+            skippedFilePath = filepath.replace(".csv", "-" + startTime + "-namespace-skipped.csv" + dryRunStr);
         } else {
             statusFilePath += ".nodetype" + dryRunStr;
+            completedFilePath = filepath.replace(".csv", "-" + startTime + "-nodetype-completed.csv" + dryRunStr);
+            rejectedFilePath = filepath.replace(".csv", "-" + startTime + "-nodetype-rejected.csv" + dryRunStr);
+            skippedFilePath = filepath.replace(".csv", "-" + startTime + "-nodetype-skipped.csv" + dryRunStr);
 
         }
 
         if (skipUntilPrefix == null) {
             skipUntilPrefix = readLastProcessingPrefix(statusFilePath);
         }
-
-        String completedFilePath = filepath.replace(".csv", "-" + startTime + "-completed.csv" + dryRunStr);
-        String rejectedFilePath = filepath.replace(".csv", "-" + startTime + "-rejected.csv" + dryRunStr);
-        String skippedFilePath = filepath.replace(".csv", "-" + startTime + "-skipped.csv" + dryRunStr);
-
 
         String[] data = {"namespace", "namespaceUri", "nodeType", "resource"};
         
