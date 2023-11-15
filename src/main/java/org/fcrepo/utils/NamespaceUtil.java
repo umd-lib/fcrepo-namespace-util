@@ -458,6 +458,7 @@ public class NamespaceUtil {
                 }
                 
             }
+            writeCurrentProcessingPrefix(statusFilePath, "complete");
         } catch (Exception e) {
             e.printStackTrace();
         }
