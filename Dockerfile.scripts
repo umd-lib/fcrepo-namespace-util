@@ -1,0 +1,15 @@
+# Dockerfile for the generating the Plastron Docker image
+#
+# To build:
+#
+# docker build -t docker.lib.umd.edu/plastrond:<VERSION> -f Dockerfile .
+#
+# where <VERSION> is the Docker image version to create.
+FROM python:3.8.18-slim
+
+RUN mkdir -p /namespace-util/scripts
+COPY scripts /namespace-util/scripts
+WORKDIR /namespace-util/scripts
+RUN pip install pysolr==3.9.0
+ENV PYTHONUNBUFFERED=1
+VOLUME /namespace-util/workspace

@@ -2,6 +2,8 @@
 
 This utility reads the registered namespaces for a Fedora repository and allows an administrator to selectively modify the namespace prefixes.
 
+The utility has been refactored to support cleaning unwanted namespaces /nodetypes. See [docs/SpuriousNamespaceCleanup.md](docs/SpuriousNamespaceCleanup.md).
+
 ## Building
 
 To build the JAR file
