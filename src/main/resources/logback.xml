@@ -1,24 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE configuration>
 <configuration>
-    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
-        <encoder>
-            <pattern>%p %d{HH:mm:ss.SSS} \(%c{0}\) %m%n</pattern>
-        </encoder>
-    </appender>
+
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%p %d{yyyy-MM-dd'T'HH:mm:ss.SSS} \(%c{0}\) %m%n</pattern>
+    </encoder>
+  </appender>
+
+  <variable name="LOG_DIR" value="${LOG_DIR:-/workspace/logs}" />
+  <timestamp key="timestamp" datePattern="yyyyMMddHHmmss"/>
+  <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+    <file>${LOG_DIR}/ns-util-${command}-${timestamp}.log</file>
+    <append>true</append>
+    <encoder>
+        <pattern>%p %d{yyyy-MM-dd'T'HH:mm:ss.SSS} \(%c{0}\) %m%n</pattern>
+    </encoder>
+  </appender>
 
   <logger name="org.fcrepo.utils" additivity="false" level="${fcrepo.log.kernel:-INFO}">
     <appender-ref ref="STDOUT"/>
+    <appender-ref ref="FILE"/>
   </logger>
 
   <logger name="org.fcrepo.kernel" additivity="false" level="${fcrepo.log.utils:-INFO}">
     <appender-ref ref="STDOUT"/>
+    <appender-ref ref="FILE"/>
   </logger>
   <logger name="org.fcrepo" additivity="false" level="${fcrepo.log:-INFO}">
     <appender-ref ref="STDOUT"/>
+    <appender-ref ref="FILE"/>
   </logger>
 
   <root additivity="false" level="WARN">
     <appender-ref ref="STDOUT"/>
+    <appender-ref ref="FILE"/>
   </root>
 </configuration>
